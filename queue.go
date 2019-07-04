@@ -113,7 +113,7 @@ func getBytes(key interface{}) ([]byte, error) {
 }
 
 // Publish messages
-func (mq *MessageQueue) Publish(routingKey, exchange string, message interface{}) error {
+func (mq *MessageQueue) Publish(routingKey, exchange string, message interface{}, contentType string) error {
 	var body []byte
 	if reflect.TypeOf(message) == reflect.TypeOf([]byte{}) {
 		body = message.([]byte)
@@ -123,6 +123,7 @@ func (mq *MessageQueue) Publish(routingKey, exchange string, message interface{}
 			return err
 		}
 		body = newBody
+
 	}
 	ch := mq.Channel
 	if ch == nil {
@@ -138,13 +139,14 @@ func (mq *MessageQueue) Publish(routingKey, exchange string, message interface{}
 		false,      // mandatory
 		false,      // immediate
 		amqp.Publishing{
-			ContentType: "application/json",
+			ContentType: contentType,
 			Body:        body,
 		})
 
 }
 
 func (mq *MessageQueue) Consume() {
+
 	defer mq.Close()
 	for _, cons := range mq.Consumers {
 		msgs, err := mq.Channel.Consume(
@@ -166,13 +168,13 @@ func (mq *MessageQueue) Consume() {
 					body := make(map[string]interface{})
 					if err := json.Unmarshal(d.Body, &body); err != nil {
 						log.Println(err)
-						if err := mq.Publish(cons.FailQueue, "", d.Body); err != nil {
+						if err := mq.Publish(cons.FailQueue, "", d.Body, "application/json"); err != nil {
 							log.Println(err)
 						}
 						d.Ack(false)
 					}
 					body["error_message"] = err.Error()
-					if err := mq.Publish(cons.FailQueue, "", body); err != nil {
+					if err := mq.Publish(cons.FailQueue, "", body, "application/json"); err != nil {
 						log.Println(err)
 					}
 				}
@@ -184,11 +186,29 @@ func (mq *MessageQueue) Consume() {
 	<-forever
 }
 
-func (mq *MessageQueue) NewConsumer(id int, consumeQ, failQ string, work func([]byte) error) {
+func (mq *MessageQueue) NewConsumer(id int, consumeQ, failQ string, work func([]byte) error) error {
 	mq.Consumers = append(mq.Consumers, Consumer{
 		ID:           id,
 		ConsumeFromQ: consumeQ,
 		FailQueue:    failQ,
 		Work:         work,
 	})
+	ch, err := mq.NewChannel()
+	if err != nil {
+		return err
+	}
+	if err := ch.Qos(mq.Prefetch, 0, false); err != nil {
+		return err
+	}
+	if _, err := ch.QueueDeclare(
+		failQ, // name
+		true,  // durable
+		false, // delete when unused
+		false, // exclusive
+		false, // no-wait
+		nil,   // arguments
+	); err != nil {
+		return err
+	}
+	return nil
 }
