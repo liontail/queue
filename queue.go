@@ -146,44 +146,45 @@ func (mq *MessageQueue) Publish(routingKey, exchange string, message interface{}
 }
 
 func (mq *MessageQueue) Consume() {
-
 	defer mq.Close()
 	for _, cons := range mq.Consumers {
-		msgs, err := mq.Channel.Consume(
-			cons.ConsumeFromQ,          // queue
-			fmt.Sprintf("%d", cons.ID), // consumer
-			false,                      // auto-ack
-			false,                      // exclusive
-			false,                      // no-local
-			false,                      // no-wait
-			nil,                        // args
-		)
-		if err != nil {
-			log.Println(err)
-			return
-		}
-		go func(cons Consumer) {
+		ch, _ := mq.NewChannel()
+		con := cons
+		go func(con *Consumer) {
+			msgs, err := ch.Consume(
+				con.ConsumeFromQ,          // queue
+				fmt.Sprintf("%d", con.ID), // consumer
+				false,                     // auto-ack
+				false,                     // exclusive
+				false,                     // no-local
+				false,                     // no-wait
+				nil,                       // args
+			)
+			if err != nil {
+				log.Println(err)
+				return
+			}
 			for d := range msgs {
-				if err := cons.Work(d.Body); err != nil {
+				if err := con.Work(d.Body); err != nil {
 					body := make(map[string]interface{})
 					if err := json.Unmarshal(d.Body, &body); err != nil {
 						log.Println(err)
-						if err := mq.Publish(cons.FailQueue, "", d.Body, "application/json"); err != nil {
+						if err := mq.Publish(con.FailQueue, "", d.Body, "application/json"); err != nil {
 							log.Println(err)
 						}
 						d.Ack(false)
 					}
 					body["error_message"] = err.Error()
-					if err := mq.Publish(cons.FailQueue, "", body, "application/json"); err != nil {
+					if err := mq.Publish(con.FailQueue, "", body, "application/json"); err != nil {
 						log.Println(err)
 					}
 				}
 				d.Ack(false)
 			}
-		}(cons)
+			<-make(chan bool)
+		}(&con)
 	}
-	forever := make(chan bool)
-	<-forever
+	<-make(chan bool)
 }
 
 func (mq *MessageQueue) NewConsumer(id int, consumeQ, failQ string, work func([]byte) error) error {
@@ -193,22 +194,5 @@ func (mq *MessageQueue) NewConsumer(id int, consumeQ, failQ string, work func([]
 		FailQueue:    failQ,
 		Work:         work,
 	})
-	ch, err := mq.NewChannel()
-	if err != nil {
-		return err
-	}
-	if err := ch.Qos(mq.Prefetch, 0, false); err != nil {
-		return err
-	}
-	if _, err := ch.QueueDeclare(
-		failQ, // name
-		true,  // durable
-		false, // delete when unused
-		false, // exclusive
-		false, // no-wait
-		nil,   // arguments
-	); err != nil {
-		return err
-	}
 	return nil
 }
