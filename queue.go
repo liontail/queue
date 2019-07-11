@@ -35,6 +35,26 @@ func (mq *MessageQueue) SetMessageQueue() *MessageQueue {
 	return messageQueue
 }
 
+func (mq *MessageQueue) DeclareExange(exchangeName string) error {
+	ch, _ := mq.NewChannel()
+	defer ch.Close()
+	return ch.ExchangeDeclare(
+		exchangeName,
+		"topic",
+		true,
+		false,
+		false,
+		false,
+		nil,
+	)
+}
+
+func (mq *MessageQueue) BindExchangeQueue(exchangeName, routingKey, queueName string) error {
+	ch, _ := mq.NewChannel()
+	defer ch.Close()
+	return ch.QueueBind(queueName, routingKey, exchangeName, false, nil)
+}
+
 func NewConnectionWithQueue(connectionStr, queueName string, prefetch int) (*MessageQueue, error) {
 	if strings.Index(connectionStr, "amqp://") != 0 {
 		connectionStr = fmt.Sprintf("amqp://%s", connectionStr)
