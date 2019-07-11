@@ -10,6 +10,7 @@ import (
 	"github.com/streadway/amqp"
 )
 
+// MessageQueue is a struct that can be create by NewConnectionWithQueue
 type MessageQueue struct {
 	Connection *amqp.Connection
 	Channel    *amqp.Channel
@@ -17,6 +18,7 @@ type MessageQueue struct {
 	Prefetch   int
 }
 
+// Consumer is a struct that represents consumer of the queue
 type Consumer struct {
 	ConsumeFromQ string
 	FailQueue    string
@@ -26,21 +28,28 @@ type Consumer struct {
 
 var messageQueue *MessageQueue
 
+// GetMessageQueue is a function that get singleton queue
 func GetMessageQueue() *MessageQueue {
 	return messageQueue
 }
 
-func (mq *MessageQueue) SetMessageQueue() *MessageQueue {
+// SetSingletonMessageQueue is a function that set queue to singleton
+func (mq *MessageQueue) SetSingletonMessageQueue() *MessageQueue {
 	messageQueue = mq
 	return messageQueue
 }
 
-func (mq *MessageQueue) DeclareExange(exchangeName string) error {
+// DeclareExchange is a function that create a exchange name with kind
+// if there is empty kind the default will be topic
+func (mq *MessageQueue) DeclareExchange(exchangeName, kind string) error {
+	if kind == "" {
+		kind = "topic"
+	}
 	ch, _ := mq.NewChannel()
 	defer ch.Close()
 	return ch.ExchangeDeclare(
 		exchangeName,
-		"topic",
+		kind,
 		true,
 		false,
 		false,
@@ -49,12 +58,18 @@ func (mq *MessageQueue) DeclareExange(exchangeName string) error {
 	)
 }
 
+// BindExchangeQueue is a function that bind a exchange and queue with routing key
+// exchangeName represents exchange name, routingKey represents routing key, and queueName represents name of the queue
 func (mq *MessageQueue) BindExchangeQueue(exchangeName, routingKey, queueName string) error {
 	ch, _ := mq.NewChannel()
 	defer ch.Close()
 	return ch.QueueBind(queueName, routingKey, exchangeName, false, nil)
 }
 
+// NewConnectionWithQueue will create a connection with queue and prefetch
+// connectionStr represents connection url ex. guest:guest@localhost ( it will automatic concat protocal amqp:// ),
+// queueName represents name of the queue that wants to declare,
+// prefetch represents number of prefetch from queue
 func NewConnectionWithQueue(connectionStr, queueName string, prefetch int) (*MessageQueue, error) {
 	if strings.Index(connectionStr, "amqp://") != 0 {
 		connectionStr = fmt.Sprintf("amqp://%s", connectionStr)
@@ -82,6 +97,7 @@ func NewConnectionWithQueue(connectionStr, queueName string, prefetch int) (*Mes
 	return &MessageQueue{Connection: conn, Channel: ch, Prefetch: prefetch}, nil
 }
 
+// Copy is a function that return a copy of MessageQueue
 func (mq *MessageQueue) Copy() *MessageQueue {
 	newConnection := MessageQueue{
 		Connection: mq.Connection,
@@ -90,11 +106,13 @@ func (mq *MessageQueue) Copy() *MessageQueue {
 	return &newConnection
 }
 
+// Close will close both channel and connection
 func (mq *MessageQueue) Close() error {
 	mq.Channel.Close()
 	return mq.Connection.Close()
 }
 
+// NewChannel will return a new channel with the prefetch
 func (mq *MessageQueue) NewChannel() (*amqp.Channel, error) {
 	ch, err := mq.Connection.Channel()
 	if err != nil {
@@ -104,6 +122,7 @@ func (mq *MessageQueue) NewChannel() (*amqp.Channel, error) {
 	return ch, nil
 }
 
+// SetQueue is a function that Declare a queue by queueName
 func (mq *MessageQueue) SetQueue(queueName string) error {
 	if mq.Channel == nil {
 		newCH, err := mq.NewChannel()
@@ -132,7 +151,11 @@ func getBytes(key interface{}) ([]byte, error) {
 	return json.Marshal(&key)
 }
 
-// Publish messages
+// Publish messages to queue
+// routingKey represents routing key, can use routingKey as a queue name
+// exchange represents exchange name, can left empty if there is none
+// message represents data that wants to put into queue
+// contentType represents type of data in the queue
 func (mq *MessageQueue) Publish(routingKey, exchange string, message interface{}, contentType string) error {
 	var body []byte
 	if reflect.TypeOf(message) == reflect.TypeOf([]byte{}) {
@@ -165,6 +188,8 @@ func (mq *MessageQueue) Publish(routingKey, exchange string, message interface{}
 
 }
 
+// Consume is a function that start to process consuming
+// by using Consumer in MessageQueue
 func (mq *MessageQueue) Consume() {
 	defer mq.Close()
 	for _, cons := range mq.Consumers {
@@ -207,6 +232,10 @@ func (mq *MessageQueue) Consume() {
 	<-make(chan bool)
 }
 
+// NewConsumer is a function that return Consumer
+// id represents tag of comsumer, consumerQ represents name of the queue that wants to consume,
+// failQ represents name of the queue that wants to send unprocessable data to,
+// work represents function that wants to excute on consuming
 func (mq *MessageQueue) NewConsumer(id int, consumeQ, failQ string, work func([]byte) error) error {
 	mq.Consumers = append(mq.Consumers, Consumer{
 		ID:           id,
