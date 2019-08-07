@@ -2,6 +2,7 @@ package queue
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"reflect"
@@ -21,6 +22,7 @@ type MessageQueue struct {
 // Consumer is a struct that represents consumer of the queue
 type Consumer struct {
 	ConsumeFromQ string
+	FailExchange string
 	FailQueue    string
 	Work         func([]byte) error
 	ID           int
@@ -83,6 +85,9 @@ func NewConnectionWithQueue(connectionStr, queueName string, prefetch int) (*Mes
 		return nil, err
 	}
 	ch.Qos(prefetch, 0, false)
+	if queueName == "" {
+		return nil, errors.New("queue name is empty")
+	}
 	if _, err := ch.QueueDeclare(
 		queueName, // name
 		true,      // durable
@@ -95,6 +100,21 @@ func NewConnectionWithQueue(connectionStr, queueName string, prefetch int) (*Mes
 	}
 
 	return &MessageQueue{Connection: conn, Channel: ch, Prefetch: prefetch}, nil
+}
+
+func DeclareQueue(queueName string) error {
+	ch := messageQueue.Channel
+	if _, err := ch.QueueDeclare(
+		queueName, // name
+		true,      // durable
+		false,     // delete when unused
+		false,     // exclusive
+		false,     // no-wait
+		nil,       // arguments
+	); err != nil {
+		return err
+	}
+	return nil
 }
 
 // Copy is a function that return a copy of MessageQueue
@@ -214,13 +234,13 @@ func (mq *MessageQueue) Consume() {
 					body := make(map[string]interface{})
 					if err := json.Unmarshal(d.Body, &body); err != nil {
 						log.Println(err)
-						if err := mq.Publish(con.FailQueue, "", d.Body, "application/json"); err != nil {
+						if err := mq.Publish(con.FailQueue, con.FailExchange, d.Body, "application/json"); err != nil {
 							log.Println(err)
 						}
 						d.Ack(false)
 					}
 					body["error_message"] = err.Error()
-					if err := mq.Publish(con.FailQueue, "", body, "application/json"); err != nil {
+					if err := mq.Publish(con.FailQueue, con.FailExchange, body, "application/json"); err != nil {
 						log.Println(err)
 					}
 				}
@@ -236,10 +256,11 @@ func (mq *MessageQueue) Consume() {
 // id represents tag of comsumer, consumerQ represents name of the queue that wants to consume,
 // failQ represents name of the queue that wants to send unprocessable data to,
 // work represents function that wants to excute on consuming
-func (mq *MessageQueue) NewConsumer(id int, consumeQ, failQ string, work func([]byte) error) error {
+func (mq *MessageQueue) NewConsumer(id int, consumeQ, failEx, failQ string, work func([]byte) error) error {
 	mq.Consumers = append(mq.Consumers, Consumer{
 		ID:           id,
 		ConsumeFromQ: consumeQ,
+		FailExchange: failEx,
 		FailQueue:    failQ,
 		Work:         work,
 	})
