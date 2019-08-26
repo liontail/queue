@@ -237,12 +237,13 @@ func (mq *MessageQueue) Consume() {
 						if err := mq.Publish(con.FailQueue, con.FailExchange, d.Body, "application/json"); err != nil {
 							log.Println(err)
 						}
-						d.Ack(false)
+					} else {
+						body["error_message"] = err.Error()
+						if err := mq.Publish(con.FailQueue, con.FailExchange, body, "application/json"); err != nil {
+							log.Println(err)
+						}
 					}
-					body["error_message"] = err.Error()
-					if err := mq.Publish(con.FailQueue, con.FailExchange, body, "application/json"); err != nil {
-						log.Println(err)
-					}
+					d.Ack(false)
 				}
 				d.Ack(false)
 			}
