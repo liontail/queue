@@ -68,15 +68,31 @@ func (mq *MessageQueue) BindExchangeQueue(exchangeName, routingKey, queueName st
 	return ch.QueueBind(queueName, routingKey, exchangeName, false, nil)
 }
 
+func genURL(connectionStr string) string {
+	if strings.Index(connectionStr, "amqp://") != 0 {
+		return fmt.Sprintf("amqp://%s", connectionStr)
+	}
+	return connectionStr
+}
+
+func NewConnection(connectionStr string) (*MessageQueue, error) {
+	conn, err := amqp.Dial(genURL(connectionStr))
+	if err != nil {
+		return nil, err
+	}
+	ch, err := conn.Channel()
+	if err != nil {
+		return nil, err
+	}
+	return &MessageQueue{Connection: conn, Channel: ch, Prefetch: 1}, nil
+}
+
 // NewConnectionWithQueue will create a connection with queue and prefetch
 // connectionStr represents connection url ex. guest:guest@localhost ( it will automatic concat protocal amqp:// ),
 // queueName represents name of the queue that wants to declare,
 // prefetch represents number of prefetch from queue
 func NewConnectionWithQueue(connectionStr, queueName string, prefetch int) (*MessageQueue, error) {
-	if strings.Index(connectionStr, "amqp://") != 0 {
-		connectionStr = fmt.Sprintf("amqp://%s", connectionStr)
-	}
-	conn, err := amqp.Dial(connectionStr)
+	conn, err := amqp.Dial(genURL(connectionStr))
 	if err != nil {
 		return nil, err
 	}
