@@ -4,10 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"reflect"
 	"strings"
 
+	"github.com/astaxie/beego/logs"
 	"github.com/streadway/amqp"
 )
 
@@ -229,9 +229,9 @@ func (mq *MessageQueue) Publish(routingKey, exchange string, message interface{}
 func (mq *MessageQueue) Consume() {
 	defer mq.Close()
 	for _, cons := range mq.Consumers {
-		ch, _ := mq.NewChannel()
 		con := cons
 		go func(con *Consumer) {
+			ch, _ := mq.NewChannel()
 			msgs, err := ch.Consume(
 				con.ConsumeFromQ,          // queue
 				fmt.Sprintf("%d", con.ID), // consumer
@@ -242,21 +242,21 @@ func (mq *MessageQueue) Consume() {
 				nil,                       // args
 			)
 			if err != nil {
-				log.Println(err)
+				logs.Error(err)
 				return
 			}
 			for d := range msgs {
 				if err := con.Work(d.Body); err != nil {
 					body := make(map[string]interface{})
 					if err := json.Unmarshal(d.Body, &body); err != nil {
-						log.Println(err)
+						logs.Error(err)
 						if err := mq.Publish(con.FailQueue, con.FailExchange, d.Body, "application/json"); err != nil {
-							log.Println(err)
+							logs.Error(err)
 						}
 					} else {
 						body["error"] = err
 						if err := mq.Publish(con.FailQueue, con.FailExchange, body, "application/json"); err != nil {
-							log.Println(err)
+							logs.Error(err)
 						}
 					}
 					d.Ack(false)
