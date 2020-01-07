@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/astaxie/beego/logs"
 	"github.com/streadway/amqp"
@@ -29,6 +30,42 @@ type Consumer struct {
 }
 
 var messageQueue *MessageQueue
+
+func NewConnection(connectionStr string, prefetch int) (*MessageQueue, error) {
+	conn, err := amqp.Dial(genURL(connectionStr))
+	if err != nil {
+		return nil, err
+	}
+	mq := MessageQueue{
+		Connection: conn,
+		Prefetch:   prefetch,
+	}
+	ch, err := mq.NewChannel()
+	if err != nil {
+		return nil, err
+	}
+	mq.Channel = ch
+	go mq.keepConnectionAlive(connectionStr, prefetch)
+	return &mq, nil
+}
+
+// NewConnectionWithQueue will create a connection with queue and prefetch
+// connectionStr represents connection url ex. guest:guest@localhost ( it will automatic concat protocal amqp:// ),
+// queueName represents name of the queue that wants to declare,
+// prefetch represents number of prefetch from queue
+func NewConnectionWithQueue(connectionStr, queueName string, prefetch int) (*MessageQueue, error) {
+	if queueName == "" {
+		return nil, errors.New("queue name is empty")
+	}
+	mq, err := NewConnection(connectionStr, prefetch)
+	if err != nil {
+		return nil, err
+	}
+	if err := mq.DeclareQueue(queueName); err != nil {
+		return nil, err
+	}
+	return mq, nil
+}
 
 // GetMessageQueue is a function that get singleton queue
 func GetMessageQueue() *MessageQueue {
@@ -68,59 +105,8 @@ func (mq *MessageQueue) BindExchangeQueue(exchangeName, routingKey, queueName st
 	return ch.QueueBind(queueName, routingKey, exchangeName, false, nil)
 }
 
-func genURL(connectionStr string) string {
-	if strings.Index(connectionStr, "amqp://") != 0 {
-		return fmt.Sprintf("amqp://%s", connectionStr)
-	}
-	return connectionStr
-}
-
-func NewConnection(connectionStr string) (*MessageQueue, error) {
-	conn, err := amqp.Dial(genURL(connectionStr))
-	if err != nil {
-		return nil, err
-	}
-	ch, err := conn.Channel()
-	if err != nil {
-		return nil, err
-	}
-	return &MessageQueue{Connection: conn, Channel: ch, Prefetch: 1}, nil
-}
-
-// NewConnectionWithQueue will create a connection with queue and prefetch
-// connectionStr represents connection url ex. guest:guest@localhost ( it will automatic concat protocal amqp:// ),
-// queueName represents name of the queue that wants to declare,
-// prefetch represents number of prefetch from queue
-func NewConnectionWithQueue(connectionStr, queueName string, prefetch int) (*MessageQueue, error) {
-	conn, err := amqp.Dial(genURL(connectionStr))
-	if err != nil {
-		return nil, err
-	}
-	ch, err := conn.Channel()
-	if err != nil {
-		return nil, err
-	}
-	ch.Qos(prefetch, 0, false)
-	if queueName == "" {
-		return nil, errors.New("queue name is empty")
-	}
-	if _, err := ch.QueueDeclare(
-		queueName, // name
-		true,      // durable
-		false,     // delete when unused
-		false,     // exclusive
-		false,     // no-wait
-		nil,       // arguments
-	); err != nil {
-		return nil, err
-	}
-
-	return &MessageQueue{Connection: conn, Channel: ch, Prefetch: prefetch}, nil
-}
-
-func DeclareQueue(queueName string) error {
-	ch := messageQueue.Channel
-	if _, err := ch.QueueDeclare(
+func (mq *MessageQueue) DeclareQueue(queueName string) error {
+	if _, err := mq.Channel.QueueDeclare(
 		queueName, // name
 		true,      // durable
 		false,     // delete when unused
@@ -182,17 +168,18 @@ func (mq *MessageQueue) SetQueue(queueName string) error {
 	return nil
 }
 
-// Get the byte array for the interface
-func getBytes(key interface{}) ([]byte, error) {
-	return json.Marshal(&key)
-}
-
 // Publish messages to queue
 // routingKey represents routing key, can use routingKey as a queue name
 // exchange represents exchange name, can left empty if there is none
 // message represents data that wants to put into queue
 // contentType represents type of data in the queue
 func (mq *MessageQueue) Publish(routingKey, exchange string, message interface{}, contentType string) error {
+	if mq.Connection == nil || mq.Connection.IsClosed() {
+		return errors.New("connection is closed")
+	}
+	if mq.Channel == nil {
+		return errors.New("channel is closed")
+	}
 	var body []byte
 	if reflect.TypeOf(message) == reflect.TypeOf([]byte{}) {
 		body = message.([]byte)
@@ -224,50 +211,43 @@ func (mq *MessageQueue) Publish(routingKey, exchange string, message interface{}
 
 }
 
-// Consume is a function that start to process consuming
-// by using Consumer in MessageQueue
-func (mq *MessageQueue) Consume() {
-	defer mq.Close()
-	for _, cons := range mq.Consumers {
-		con := cons
-		go func(con *Consumer) {
-			ch, _ := mq.NewChannel()
-			msgs, err := ch.Consume(
-				con.ConsumeFromQ,          // queue
-				fmt.Sprintf("%d", con.ID), // consumer
-				false,                     // auto-ack
-				false,                     // exclusive
-				false,                     // no-local
-				false,                     // no-wait
-				nil,                       // args
-			)
-			if err != nil {
-				logs.Error(err)
-				return
-			}
-			for d := range msgs {
-				if err := con.Work(d.Body); err != nil {
-					body := make(map[string]interface{})
-					if err := json.Unmarshal(d.Body, &body); err != nil {
-						logs.Error(err)
-						if err := mq.Publish(con.FailQueue, con.FailExchange, d.Body, "application/json"); err != nil {
-							logs.Error(err)
-						}
-					} else {
-						body["error"] = err
-						if err := mq.Publish(con.FailQueue, con.FailExchange, body, "application/json"); err != nil {
-							logs.Error(err)
-						}
-					}
-					d.Ack(false)
-					continue
-				}
-				d.Ack(false)
-			}
-			<-make(chan bool)
-		}(&con)
+func retryConnection(connectionStr string, prefetch int) *MessageQueue {
+	mq, qerr := NewConnection(connectionStr, prefetch)
+	for qerr != nil {
+		logs.Info("Connection Retry Connecting in 3 seconds")
+		time.Sleep(time.Second * 3)
+		mq, qerr = NewConnection(connectionStr, prefetch)
+		if qerr != nil {
+			logs.Error(qerr)
+		}
 	}
-	<-make(chan bool)
+	logs.Info("Connection Retry Connect Succeed")
+	return mq
+}
+
+func (mq *MessageQueue) retryChannel() *amqp.Channel {
+	if mq.Connection == nil {
+		time.Sleep(time.Second * 1)
+		return mq.retryChannel()
+	}
+	ch, cerr := mq.NewChannel()
+	if cerr != nil {
+		logs.Error(cerr)
+		mq.retryChannel()
+	}
+	logs.Info("Channel Retry Connect Succeed")
+	return ch
+}
+
+func (mq *MessageQueue) keepConnectionAlive(connectionStr string, prefetch int) {
+	conn := mq.Connection
+	closedCH := make(chan *amqp.Error)
+	err := <-conn.NotifyClose(closedCH)
+	mq.Connection = nil
+	logs.Error("Connection Closed:", err)
+	newMq := retryConnection(connectionStr, prefetch)
+	mq.Connection = newMq.Connection
+	mq.Channel = newMq.Channel
 }
 
 // NewConsumer is a function that return Consumer
@@ -283,4 +263,92 @@ func (mq *MessageQueue) NewConsumer(id int, consumeQ, failEx, failQ string, work
 		Work:         work,
 	})
 	return nil
+}
+
+// Consume is a function that start to process consuming
+// by using Consumer in MessageQueue
+func (mq *MessageQueue) Consume() {
+	for _, cons := range mq.Consumers {
+		con := cons
+		ch, err := mq.NewChannel()
+		if err != nil {
+			logs.Error(err)
+			continue
+		}
+
+		var consume = func(con *Consumer, ch *amqp.Channel) <-chan amqp.Delivery {
+			msgs, err := ch.Consume(
+				con.ConsumeFromQ,          // queue
+				fmt.Sprintf("%d", con.ID), // consumer
+				false,                     // auto-ack
+				false,                     // exclusive
+				false,                     // no-local
+				false,                     // no-wait
+				nil,                       // args
+			)
+			if err != nil {
+				logs.Error(err)
+				return nil
+			}
+			return msgs
+		}
+		go func(con *Consumer, ch *amqp.Channel, mq *MessageQueue) {
+			var msgs <-chan amqp.Delivery
+			if newMsgsChannel := consume(con, ch); newMsgsChannel != nil {
+				msgs = newMsgsChannel
+			} else {
+				logs.Error("Cannot Create Consume")
+				return
+			}
+			closedCH := make(chan *amqp.Error)
+			for {
+				select {
+				case d := <-msgs:
+					if err := con.Work(d.Body); err != nil {
+						body := make(map[string]interface{})
+						if err := json.Unmarshal(d.Body, &body); err != nil {
+							logs.Error(err)
+							if err := mq.Publish(con.FailQueue, con.FailExchange, d.Body, "application/json"); err != nil {
+								logs.Error(err)
+							}
+						} else {
+							body["error"] = err
+							if err := mq.Publish(con.FailQueue, con.FailExchange, body, "application/json"); err != nil {
+								logs.Error(err)
+							}
+						}
+						d.Ack(false)
+						continue
+					}
+					d.Ack(false)
+
+				case cerr := <-ch.NotifyClose(closedCH):
+					logs.Error("Channel Closed:", cerr)
+					time.Sleep(time.Second * 1)
+					newCh := mq.retryChannel()
+					ch = newCh
+					closedCH = make(chan *amqp.Error)
+					if newMsgsChannel := consume(con, ch); newMsgsChannel != nil {
+						msgs = newMsgsChannel
+					} else {
+						logs.Error("Cannot Create Consume")
+						return
+					}
+				}
+			}
+		}(&con, ch, mq)
+	}
+	<-make(chan bool)
+}
+
+// Get the byte array for the interface
+func getBytes(key interface{}) ([]byte, error) {
+	return json.Marshal(&key)
+}
+
+func genURL(connectionStr string) string {
+	if strings.Index(connectionStr, "amqp://") != 0 {
+		return fmt.Sprintf("amqp://%s", connectionStr)
+	}
+	return connectionStr
 }
